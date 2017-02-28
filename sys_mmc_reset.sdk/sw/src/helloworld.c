@@ -5,19 +5,23 @@
 #include "gpio.h"
 
 #define MMC_I2C_ADDR7 0x3E
+
 /* MMC register map */
 #define MMC_XCMD_WREG        0x800 //execute command
-//#define MMC_CMD_RESULT_WREG  0x804 //result of last command
+//#define MMC_CMD_RESULT_WREG  0x804 //result of last command, read only
 #define MMC_ADDR_WREG        0x808 //address used to read/write flash and SD-card
-#define MMC_SECURE_KEY_WREG  0x80C //used to grant access to secured commands
+#define MMC_DATA_WREG        0x80C //data register used by commands that need a data argument (eg: set file length)
+#define MMC_SECURE_KEY_WREG  0x810 //used to grant access to secured commands
 
 #define MMC_XCMD_RREG        0x900 //execute command
 #define MMC_CMD_RESULT_RREG  0x904 //result of last command
 #define MMC_ADDR_RREG        0x908 //address used to read/write flash and SD-card
-#define MMC_SECURE_KEY_RREG  0x90C //used to grant access to secured commands
+#define MMC_DATA_RREG        0x90C //data register used by commands that need a data argument (eg: set file length)
+#define MMC_SECURE_KEY_RREG  0x910 //used to grant access to secured commands
 
 #define MMC_FLASH_WBUF_ADDR 0x1000
 #define MMC_FLASH_RBUF_ADDR 0x1100
+
 /* other constants */
 #define MMC_SECURE_KEY      0x600DF00D //security key used to unlock commands
 #define MMC_FLASH_BUF_LEN   256
@@ -34,6 +38,7 @@
 #define MMC_CMD_SDREAD 0x0007 //read 16B from SDcard's address stored in MMC_ADDR_REG. Data is stored in FLASH_RBUF_ADDR
 #define MMC_CMD_SDPROG 0x0008 //write 16B to SDcard's address stored in MMC_ADDR_REG. Data is taken from FLASH_WBUF_ADDR
 #define MMC_CMD_TSD    0x0009 //Execute timed shutdown (switch off power supply for 5 seconds, then switch on again)
+#define MMC_CMD_WRLEN  0x000A //Write file length. Uses the file address from the ADDR register, and the length from the DATA register.
 
 #define buf8_to_16(x) ((x[0]<<8) | x[1])
 #define buf8_to_32(x) ((x[0]<<24) | (x[1]<<16) | (x[2]<<8) | x[3] )
@@ -84,104 +89,22 @@ void mmc_send16(u8 c1, u8 c2)
 }
 
 
-/*
- * Send a 32 bit I2C transaction to the MMC
- *   Payload : addr(MSB), addr(LSB), data(MSB), data(LSB)
- *   returns the number of bytes sent
+/* get a 32bit hex from STDIN
+ * MSG: string printed before asking for user input
+ * NMAX: max number of input characters (input can also be terminated before reaching
+ * the maximum by hitting CR on the keyboard)
+ *
+ * returns: input string converted from HEX to UINT32
  */
-unsigned mmc_send32(u16 addr, u16 data) {
-
-	u8 txbuf[4];
-
-	txbuf[0] = addr >> 8;
-	txbuf[1] = addr & 0xFF;
-	txbuf[2] = data >> 8;
-	txbuf[3] = data & 0xFF;
-
-	return( XIic_Send(XPAR_AXI_IIC_0_BASEADDR, MMC_I2C_ADDR7, txbuf, 4, XIIC_STOP) );
-}
-
-/* Read data via I2C from MMC
- * The read address shall be set previously with a write transaction (either 32 or 16 bit)
- */
-unsigned mmc_read(u8 *rxbuf, u16 n) {
-
-	return( XIic_Recv(XPAR_AXI_IIC_0_BASEADDR, MMC_I2C_ADDR7, rxbuf, n, XIIC_STOP) );
-
-}
-
-/* Execute GPAC3 command
- * Writes the CMD argument to address MMC_XCMD_REG (0x800)
- */
-unsigned mmc_execute_cmd(u16 cmd) {
-
-	return( mmc_send32(MMC_XCMD_WREG, cmd) );
-
-}
-
-/* get current address register stored in MMC */
-u32 mmc_get_addr(void) {
-	u8 rxbuf[4];
-
-	mmc_send32(MMC_ADDR_RREG, 0);
-	mmc_read(rxbuf, 4);
-
-	return (buf8_to_32(rxbuf));
-}
-
-/* get command result register stored in MMC */
-u32 mmc_get_cmd_res(void) {
-	u8 rxbuf[4];
-
-	mmc_send32(MMC_CMD_RESULT_RREG, 0);
-	mmc_read(rxbuf, 4);
-
-	return (buf8_to_32(rxbuf));
-}
-
-/* write MMC address register */
-void mmc_set_addr(u32 addr) {
-	mmc_send32(MMC_ADDR_WREG, addr>>16);
-	mmc_send32(MMC_ADDR_WREG+2, addr&0xFFFF);
-}
-
-/* get data buffer from MMC */
-unsigned mmc_get_buffer(u8 *buf, u16 n) {
-
-	n = (n>MMC_FLASH_BUF_LEN)?MMC_FLASH_BUF_LEN:n;
-
-	mmc_send32(MMC_FLASH_RBUF_ADDR, 0);
-	return (mmc_read(buf, n)) ;
-}
-
-/* get command registers from MMC */
-unsigned mmc_get_cmd_regs(u8 *buf) {
-
-	mmc_send32(MMC_XCMD_RREG, 0);
-	return (mmc_read(buf, 16)) ;
-}
-
-/* display local data buffer */
-void mmc_display_buffer(u8 *buf, u16 n) {
-	u16 i;
-
-	n = (n>MMC_FLASH_BUF_LEN)?MMC_FLASH_BUF_LEN:n;
-
-	for(i=0; i<n; i++) {
-		if (i%16 == 0) xil_printf("\n\r%02x:", i);
-		if (i%4  == 0) xil_printf(" ");
-		xil_printf("%02x", buf[i]);
-	}
-
-}
-
-/* get a 32bit hex from STDIN */
 u32 hex_from_console(const char* msg, u8 nmax){
 
     u8 i, step, inchar[9];
     u32 outval;
 
-    //tic = tick_counter;
+    if (nmax>8) {
+        xil_printf("\r\nERROR: nmax shall be <9\r\n");
+        return 0;
+    }
 
     xil_printf(msg);
     //13=CR
@@ -234,10 +157,169 @@ u32 hex_from_console(const char* msg, u8 nmax){
     return outval;
 }
 
+/* Send a 32 bit I2C transaction to the MMC
+ *   Transaction's payload : addr(MSB), addr(LSB), data(MSB), data(LSB)
+ *   returns the number of bytes sent (shall be always 4)
+ */
+unsigned mmc_send32(u16 addr, u16 data) {
+
+	u8 txbuf[4];
+
+	txbuf[0] = addr >> 8;
+	txbuf[1] = addr & 0xFF;
+	txbuf[2] = data >> 8;
+	txbuf[3] = data & 0xFF;
+
+	return( XIic_Send(XPAR_AXI_IIC_0_BASEADDR, MMC_I2C_ADDR7, txbuf, 4, XIIC_STOP) );
+}
+
+/* Read N bytes of data via I2C from MMC
+ * The read address shall be set previously with a write transaction (either 32 or 16 bit)
+ * RXBUF: buffer used to store the received data
+ * N    : number of bytes requested
+ * returns the number of bytes received (shall be N)
+ */
+unsigned mmc_read(u8 *rxbuf, u16 n) {
+
+	return( XIic_Recv(XPAR_AXI_IIC_0_BASEADDR, MMC_I2C_ADDR7, rxbuf, n, XIIC_STOP) );
+
+}
+
+/* Execute GPAC3 command
+ * Writes the CMD argument to address MMC_XCMD_REG (0x800)
+ * The command outcome shall be always checked by reading the RESULT register with mmc_get_cmd_res()
+ *
+ * returns the number of bytes sent (shall be 4)
+ */
+unsigned mmc_execute_cmd(u16 cmd) {
+
+	return( mmc_send32(MMC_XCMD_WREG, cmd) );
+
+}
+
+/* write MMC address register
+ *
+ * returns number of bytes sent (shall be 8)
+ */
+unsigned mmc_set_addr(u32 addr) {
+	unsigned ret = 0;
+
+	ret += mmc_send32(MMC_ADDR_WREG, addr>>16);
+	ret += mmc_send32(MMC_ADDR_WREG+2, addr&0xFFFF);
+
+	return ret;
+}
+
+/* get current address register stored in MMC */
+u32 mmc_get_addr(void) {
+	u8 rxbuf[4];
+
+	mmc_send32(MMC_ADDR_RREG, 0);
+	mmc_read(rxbuf, 4);
+
+	return (buf8_to_32(rxbuf));
+}
+
+/* write MMC data register */
+void mmc_set_data(u32 data) {
+	mmc_send32(MMC_DATA_WREG, data>>16);
+	mmc_send32(MMC_DATA_WREG+2, data&0xFFFF);
+}
+
+/* get current data register stored in MMC */
+u32 mmc_get_data(void) {
+	u8 rxbuf[4];
+
+	mmc_send32(MMC_DATA_RREG, 0);
+	mmc_read(rxbuf, 4);
+
+	return (buf8_to_32(rxbuf));
+}
+
+/* get command result register stored in MMC */
+u32 mmc_get_cmd_res(void) {
+	u8 rxbuf[4];
+
+	mmc_send32(MMC_CMD_RESULT_RREG, 0);
+	mmc_read(rxbuf, 4);
+
+	return (buf8_to_32(rxbuf));
+}
+
+
+/* Get FLASH data buffer from MMC
+ * returns number of bytes read
+ */
+unsigned mmc_get_buffer(u8 *buf, u16 n) {
+
+	n = (n>MMC_FLASH_BUF_LEN)?MMC_FLASH_BUF_LEN:n;
+
+	mmc_send32(MMC_FLASH_RBUF_ADDR, 0);
+	return (mmc_read(buf, n)) ;
+}
+
+/* Set FLASH data buffer in MMC */
+unsigned mmc_set_buffer(u8 *buf, u16 n) {
+
+	unsigned ret = 0, i;
+
+	n = (n>MMC_FLASH_BUF_LEN)?MMC_FLASH_BUF_LEN:n;
+
+	for (i=0; i<n; i+=2) {
+		ret += mmc_send32(i+MMC_FLASH_WBUF_ADDR, buf8_to_16((buf+i)) );
+	}
+
+	return (ret);
+}
+
+/* get all command registers from MMC */
+unsigned mmc_get_cmd_regs(u8 *buf) {
+
+	mmc_send32(MMC_XCMD_RREG, 0);
+	return (mmc_read(buf, 20)) ;
+}
+
+/* display any local buffer
+ * BUF: pointer to local buffer
+ * N:   number of bytes to display
+ */
+void mmc_display_buffer(u8 *buf, u16 n) {
+	u16 i;
+
+	n = (n>MMC_FLASH_BUF_LEN)?MMC_FLASH_BUF_LEN:n;
+
+	for(i=0; i<n; i++) {
+		if (i%16 == 0) xil_printf("\n\r%02x:", i);
+		if (i%4  == 0) xil_printf(" ");
+		xil_printf("%02x", buf[i]);
+	}
+}
+
+/* Writes file length to MMC's FLASH memory (needed to enable FILE for use in MMC)
+ * ADDR: address of file (shall be aligned to 1MiB)
+ * LEN:  file length in bytes
+ */
+int mmc_set_file_length(u32 addr, u32 len) {
+
+	u8 txbuf[8];
+
+	//write file address in MMC's address register
+	mmc_set_addr(addr);
+
+	//wrote file length in MMC's data register
+	mmc_set_data(len);
+
+	//Execute command
+	mmc_execute_cmd(MMC_CMD_WRLEN);
+
+	return 0;
+}
+
+
 int main()
 {
-	u32 addr, res, i;
-	u8  rxbuf[256], sector;
+	u32 addr, res;
+	u8  rxbuf[256], sector, file_id;
 	char c;
 
 
@@ -261,6 +343,8 @@ int main()
 		xil_printf("    8: Write SD card\n\r");
 		xil_printf("    9: Timed Shutdown\n\r");
 		xil_printf("    A: Set address\n\r");
+		xil_printf("    B: Set programming file length\n\r");
+		xil_printf("    C: Display MMC's data buffer\n\r");
 		xil_printf("\n\rSelect option (current address 0x%08X):\n\r", addr);
 
 		//c = getchar();
@@ -273,34 +357,30 @@ int main()
 			mmc_display_buffer(rxbuf, 16);
 			break;
 		case '1': //read flash
-			if (addr & 0xFF000000) {
-				xil_printf("ERROR: address out of bound (shall be 24-bit)\n\r");
+			mmc_execute_cmd(MMC_CMD_FREAD);
+			res = mmc_get_cmd_res();
+			if (res &0xFFFF) {
+				xil_printf("Got error 0x%08X while trying to read FLASH\n\r", res);
 			} else {
-				mmc_execute_cmd(MMC_CMD_FREAD);
-				//todo poll result register
 				mmc_get_buffer(rxbuf, MMC_FLASH_BUF_LEN);
 				mmc_display_buffer(rxbuf, MMC_FLASH_BUF_LEN);
 			}
 			break;
-		case '2': //erase flash
-			if (addr % FLASH_SECTOR_SIZE) {
-				xil_printf("    ERROR: The address shall be sector-aligned (N*0x10000)\n\r");
-			} else if (addr & 0xFF000000) {
-				xil_printf("ERROR: address out of bound (shall be 24-bit)\n\r");
+		case '2': //erase flash sector
+			mmc_execute_cmd(MMC_CMD_FERASE);
+			res = mmc_get_cmd_res();
+			if (res &0xFFFF) {
+				xil_printf("Got error 0x%08X while trying to erase FLASH sector\n\r", res);
 			} else {
-				mmc_execute_cmd(MMC_CMD_FERASE);
-				//todo poll result register
-				wait_s(1);
 				xil_printf("DONE\n\r");
 			}
 			break;
 		case '3': //program flash
-			if (addr & 0xFF000000) {
-				xil_printf("ERROR: address out of bound (shall be 24-bit)\n\r");
+			mmc_execute_cmd(MMC_CMD_FPROG);
+			res = mmc_get_cmd_res();
+			if (res &0xFFFF) {
+				xil_printf("Got error 0x%08X while trying to write FLASH\n\r", res);
 			} else {
-				mmc_execute_cmd(MMC_CMD_FPROG);
-				//todo poll result register
-				wait_s(1);
 				xil_printf("DONE\n\r");
 			}
 			break;
@@ -318,8 +398,6 @@ int main()
 			break;
 		case '7': //Read SDCard
 			mmc_execute_cmd(MMC_CMD_SDREAD);
-			wait_s(1);
-			//todo poll result register
 			res = mmc_get_cmd_res();
 			if (res & 0xFFFF) {
 				xil_printf("Got error 0x%08X while reading SD card\n\r", res);
@@ -351,12 +429,14 @@ int main()
 			mmc_set_addr(addr);
 			xil_printf("Set address register to 0x%08x\n\r", addr);
 			break;
-		case 'B': //write test data to buffer
-			memset(rxbuf, 0, 16);
-			memcpy(rxbuf, "Don't Panic!", sizeof("Don't Panic!") );
-			for(i=0; i<16; i+=2) {
-				mmc_send32(MMC_FLASH_WBUF_ADDR+i, ((rxbuf[i]<<8) | rxbuf[i+1]) );
-			}
+		case 'B': //set file length (info section address calculated automatically)
+			file_id = hex_from_console("File ID (0x0 to 0xE)  = 0x", 1);
+			res     = hex_from_console("File length (max 1MB) = 0x ", 6);
+			mmc_set_file_length(file_id, res);
+			break;
+		case 'C': //display current MMC buffer
+			mmc_get_buffer(rxbuf, MMC_FLASH_BUF_LEN);
+			mmc_display_buffer(rxbuf, MMC_FLASH_BUF_LEN);
 			break;
 		default:
 			xil_printf("Unsupported command\n\r");

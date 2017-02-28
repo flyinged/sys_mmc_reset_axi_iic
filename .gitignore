@@ -16,3 +16,6 @@
 *.sdk/webtalk/
 
 
+*.o
+*.elf
+*.size
