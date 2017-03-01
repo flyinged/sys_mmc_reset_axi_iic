@@ -300,8 +300,7 @@ void mmc_display_buffer(u8 *buf, u16 n) {
  * LEN:  file length in bytes
  */
 int mmc_set_file_length(u32 addr, u32 len) {
-
-	u8 txbuf[8];
+	u32 res;
 
 	//write file address in MMC's address register
 	mmc_set_addr(addr);
@@ -312,14 +311,22 @@ int mmc_set_file_length(u32 addr, u32 len) {
 	//Execute command
 	mmc_execute_cmd(MMC_CMD_WRLEN);
 
-	return 0;
+	res = mmc_get_cmd_res();
+	if (res & 0xFFFF) {
+		xil_printf("Got error 0x%08X while trying to set file length\n\r", res);
+		return 1;
+	} else {
+		xil_printf("DONE\n\r");
+		return 0;
+	}
+
 }
 
 
 int main()
 {
 	u32 addr, res;
-	u8  rxbuf[256], sector, file_id;
+	u8  rxbuf[256], sector;
 	char c;
 
 
@@ -430,9 +437,8 @@ int main()
 			xil_printf("Set address register to 0x%08x\n\r", addr);
 			break;
 		case 'B': //set file length (info section address calculated automatically)
-			file_id = hex_from_console("File ID (0x0 to 0xE)  = 0x", 1);
-			res     = hex_from_console("File length (max 1MB) = 0x ", 6);
-			mmc_set_file_length(file_id, res);
+			res     = hex_from_console("File length (max 1MB) = 0x", 6);
+			mmc_set_file_length(addr, res);
 			break;
 		case 'C': //display current MMC buffer
 			mmc_get_buffer(rxbuf, MMC_FLASH_BUF_LEN);
