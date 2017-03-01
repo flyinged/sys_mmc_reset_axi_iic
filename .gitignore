@@ -14,9 +14,6 @@
 *.sdk/bsp/microblaze_0/
 *.sdk/RemoteSystemsTempFiles/
 *.sdk/webtalk/
-
-
-*.o
+*.sdk/Debug/
 *.elf
 *.size
-*.o

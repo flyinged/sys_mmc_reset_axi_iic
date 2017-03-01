@@ -39,6 +39,7 @@
 #define MMC_CMD_SDPROG 0x0008 //write 16B to SDcard's address stored in MMC_ADDR_REG. Data is taken from FLASH_WBUF_ADDR
 #define MMC_CMD_TSD    0x0009 //Execute timed shutdown (switch off power supply for 5 seconds, then switch on again)
 #define MMC_CMD_WRLEN  0x000A //Write file length. Uses the file address from the ADDR register, and the length from the DATA register.
+#define MMC_CMD_CRC    0x000B //Compute CRC on file. Uses current address register to select file, and stored file length.
 
 #define buf8_to_16(x) ((x[0]<<8) | x[1])
 #define buf8_to_32(x) ((x[0]<<24) | (x[1]<<16) | (x[2]<<8) | x[3] )
@@ -295,34 +296,8 @@ void mmc_display_buffer(u8 *buf, u16 n) {
 	}
 }
 
-/* Writes file length to MMC's FLASH memory (needed to enable FILE for use in MMC)
- * ADDR: address of file (shall be aligned to 1MiB)
- * LEN:  file length in bytes
- */
-int mmc_set_file_length(u32 addr, u32 len) {
-	u32 res;
 
-	//write file address in MMC's address register
-	mmc_set_addr(addr);
-
-	//wrote file length in MMC's data register
-	mmc_set_data(len);
-
-	//Execute command
-	mmc_execute_cmd(MMC_CMD_WRLEN);
-
-	res = mmc_get_cmd_res();
-	if (res & 0xFFFF) {
-		xil_printf("Got error 0x%08X while trying to set file length\n\r", res);
-		return 1;
-	} else {
-		xil_printf("DONE\n\r");
-		return 0;
-	}
-
-}
-
-
+/********************** MAIN *************************/
 int main()
 {
 	u32 addr, res;
@@ -351,7 +326,8 @@ int main()
 		xil_printf("    9: Timed Shutdown\n\r");
 		xil_printf("    A: Set address\n\r");
 		xil_printf("    B: Set programming file length\n\r");
-		xil_printf("    C: Display MMC's data buffer\n\r");
+		xil_printf("    C: Compute file's CRC\n\r");
+		xil_printf("    D: Display MMC's data buffer\n\r");
 		xil_printf("\n\rSelect option (current address 0x%08X):\n\r", addr);
 
 		//c = getchar();
@@ -382,7 +358,7 @@ int main()
 				xil_printf("DONE\n\r");
 			}
 			break;
-		case '3': //program flash
+		case '3': //program flash with local buffer's content
 			mmc_execute_cmd(MMC_CMD_FPROG);
 			res = mmc_get_cmd_res();
 			if (res &0xFFFF) {
@@ -415,10 +391,9 @@ int main()
 			break;
 		case '8': //Write SDCard
 			if (addr % SD_SECTOR_SIZE) {
-				xil_printf("ERROR: address shall be sector-aligned (N*0x200)\n\r");
+				xil_printf("ERROR: address shall be sector-aligned (N*0x200)\n\r"); //TODO remove
 			} else {
 				mmc_execute_cmd(MMC_CMD_SDPROG);
-				//todo poll result register
 				res = mmc_get_cmd_res();
 				if (res & 0xFFFF) {
 					xil_printf("Got error 0x%08X while writing SD card\n\r", res);
@@ -437,10 +412,32 @@ int main()
 			xil_printf("Set address register to 0x%08x\n\r", addr);
 			break;
 		case 'B': //set file length (info section address calculated automatically)
-			res     = hex_from_console("File length (max 1MB) = 0x", 6);
-			mmc_set_file_length(addr, res);
+			res = hex_from_console("File length (max 1MB) = 0x", 6);
+			//write file length in MMC's data register
+			mmc_set_data(res);
+			//Execute command (uses current address register)
+			mmc_execute_cmd(MMC_CMD_WRLEN);
+			//check result
+			res = mmc_get_cmd_res();
+			if (res & 0xFFFF) {
+				xil_printf("Got error 0x%08X while trying to set file length\n\r", res);
+			} else {
+				xil_printf("DONE\n\r");
+			}
 			break;
-		case 'C': //display current MMC buffer
+		case 'C': //compute CRC
+			//Execute command (uses current address register)
+			mmc_execute_cmd(MMC_CMD_CRC);
+			xil_printf("Computing...");
+			//check result
+			res = mmc_get_cmd_res();
+			if (res & 0xFFFF) {
+				xil_printf("Got error 0x%08X while trying to conpute CRC\n\r", res);
+			} else {
+				xil_printf("DONE\n\r");
+			}
+			break;
+		case 'D': //display current MMC buffer
 			mmc_get_buffer(rxbuf, MMC_FLASH_BUF_LEN);
 			mmc_display_buffer(rxbuf, MMC_FLASH_BUF_LEN);
 			break;
