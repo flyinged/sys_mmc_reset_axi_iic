@@ -23,7 +23,7 @@
 #define MMC_FLASH_RBUF_ADDR 0x1100
 
 /* other constants */
-#define MMC_SECURE_KEY      0x600DF00D //security key used to unlock commands
+#define MMC_SECURE_KEY      0x4F50454E //security key used to unlock commands (ASCII for 'OPEN')
 #define MMC_FLASH_BUF_LEN   256
 #define FLASH_SECTOR_SIZE   0x10000
 #define SD_SECTOR_SIZE      0x200
@@ -296,6 +296,16 @@ void mmc_display_buffer(u8 *buf, u16 n) {
 	}
 }
 
+/* Send unlock code to enable secured commands */
+void mmc_unlock() {
+	mmc_send32(MMC_SECURE_KEY_WREG,   MMC_SECURE_KEY>>16);
+	mmc_send32(MMC_SECURE_KEY_WREG+2, MMC_SECURE_KEY&0xFFFF);
+}
+
+/* TODO: copy a file between different section of the FLASH memory */
+void copy_flash_file(u8 src_id, u8 dst_id) {
+
+}
 
 /********************** MAIN *************************/
 int main()
@@ -350,6 +360,7 @@ int main()
 			}
 			break;
 		case '2': //erase flash sector
+			mmc_unlock();
 			mmc_execute_cmd(MMC_CMD_FERASE);
 			res = mmc_get_cmd_res();
 			if (res &0xFFFF) {
@@ -359,6 +370,7 @@ int main()
 			}
 			break;
 		case '3': //program flash with local buffer's content
+			mmc_unlock();
 			mmc_execute_cmd(MMC_CMD_FPROG);
 			res = mmc_get_cmd_res();
 			if (res &0xFFFF) {
@@ -369,14 +381,17 @@ int main()
 			break;
 		case '4': //IAP0
 			xil_printf("System is going down...\n\r");
+			mmc_unlock();
 			mmc_execute_cmd(MMC_CMD_IAP0);
 			break;
 		case '5': //IAP1
 			xil_printf("System is going down...\n\r");
+			mmc_unlock();
 			mmc_execute_cmd(MMC_CMD_IAP1);
 			break;
 		case '6': //Reset
 			xil_printf("System is going down...\n\r");
+			mmc_unlock();
 			mmc_execute_cmd(MMC_CMD_RESET);
 			break;
 		case '7': //Read SDCard
@@ -393,6 +408,7 @@ int main()
 			if (addr % SD_SECTOR_SIZE) {
 				xil_printf("ERROR: address shall be sector-aligned (N*0x200)\n\r"); //TODO remove
 			} else {
+				mmc_unlock();
 				mmc_execute_cmd(MMC_CMD_SDPROG);
 				res = mmc_get_cmd_res();
 				if (res & 0xFFFF) {
@@ -404,6 +420,7 @@ int main()
 			break;
 		case '9': //timed shutdown
 			xil_printf("System is going down...\n\r");
+			mmc_unlock();
 			mmc_execute_cmd(MMC_CMD_TSD);
 			break;
 		case 'A':
@@ -416,6 +433,7 @@ int main()
 			//write file length in MMC's data register
 			mmc_set_data(res);
 			//Execute command (uses current address register)
+			mmc_unlock();
 			mmc_execute_cmd(MMC_CMD_WRLEN);
 			//check result
 			res = mmc_get_cmd_res();
@@ -427,6 +445,7 @@ int main()
 			break;
 		case 'C': //compute CRC
 			//Execute command (uses current address register)
+			mmc_unlock();
 			mmc_execute_cmd(MMC_CMD_CRC);
 			xil_printf("Computing...");
 			//check result
