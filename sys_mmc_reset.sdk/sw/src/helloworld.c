@@ -25,7 +25,9 @@
 /* other constants */
 #define MMC_SECURE_KEY      0x4F50454E //security key used to unlock commands (ASCII for 'OPEN')
 #define MMC_FLASH_BUF_LEN   256
-#define FLASH_SECTOR_SIZE   0x10000
+#define FLASH_SECTOR_SIZE   0x10000 //depends on FLASH chip
+#define FLASH_INFO_ID       15 //Flash section reserved to store info on other sections
+#define FLASH_FILE_SIZE     0x100000 //FLASH is divided in 1MiB sections, on file per section
 #define SD_SECTOR_SIZE      0x200
 /* MMC command codes */
 #define MMC_CMD_NULL   0x0000 //no effect. can be used to set the read address for the command registers
@@ -43,6 +45,7 @@
 
 #define buf8_to_16(x) ((x[0]<<8) | x[1])
 #define buf8_to_32(x) ((x[0]<<24) | (x[1]<<16) | (x[2]<<8) | x[3] )
+#define info_addr(x)  ((FLASH_INFO_ID * FLASH_FILE_SIZE) + (x * FLASH_SECTOR_SIZE))
 
 char inbyte(void);
 
@@ -302,9 +305,135 @@ void mmc_unlock() {
 	mmc_send32(MMC_SECURE_KEY_WREG+2, MMC_SECURE_KEY&0xFFFF);
 }
 
-/* TODO: copy a file between different section of the FLASH memory */
-void copy_flash_file(u8 src_id, u8 dst_id) {
+/* copy a file between different section of the FLASH memory */
+int mmc_flash_file_copy(u8 src_id, u8 dst_id) {
+	u32 src_adr, dst_adr, file_size, file_crc, res;
+	u16 nbuffers, i, progress;
+	u8  rxbuf[256];
 
+	/* parameter checks */
+	if (src_id > 14 || dst_id > 14) {
+		xil_printf("copy_flash_file()::ERROR::Maximum allowed ID is 14\n\r");
+		return 1;
+	} else if (src_id == dst_id) {
+		xil_printf("copy_flash_file()::ERROR::Source ID shall be different from destination ID\n\r");
+		return 1;
+	}
+
+	/* compute addresses */
+	src_adr = src_id * FLASH_FILE_SIZE;
+	dst_adr = dst_id * FLASH_FILE_SIZE;
+
+	/* get file size and CRC */
+	mmc_set_addr( info_addr(src_id) );
+	mmc_execute_cmd(MMC_CMD_FREAD);
+	res = mmc_get_cmd_res();
+	if ( res & 0xFFFF) {
+		xil_printf("copy_flash_file()::ERROR::Cannot read source file info (error 0x%08X)\n\r", res);
+		return 1;
+	}
+	mmc_get_buffer(rxbuf, 12);
+	file_size = buf8_to_32((rxbuf+4));
+	file_crc  = buf8_to_32((rxbuf+8));
+
+	/* compute number of buffers to write */
+	nbuffers = file_size / MMC_FLASH_BUF_LEN;
+	if (file_size % MMC_FLASH_BUF_LEN) nbuffers++; //one more if file is not an integer multiple of MMC_FLASH_BUF_LEN
+	xil_printf("copy_flash_file()::INFO::file_size = 0x%08X (%d buffers), CRC = 0x%08X\n\r", file_size, nbuffers, file_crc);
+
+	/* read all buffers and write them to destination address */
+	for(i = 0; i < nbuffers; i++) {
+		progress = (100*(u32)i)/nbuffers;
+		xil_printf("\rProgress: %03d%%", progress);
+
+		/* read current buffer */
+		mmc_set_addr( src_adr );
+		mmc_execute_cmd(MMC_CMD_FREAD); //read from FLASH into MMC's buffer
+		res = mmc_get_cmd_res();
+		if ( res & 0xFFFF) {
+			xil_printf("\n\rcopy_flash_file()::ERROR::Could not read FLASH address 0x%08X\n\r", src_adr);
+			return 1;
+		}
+
+		/* load MMC's read buffer into local buffer */
+		mmc_get_buffer(rxbuf, MMC_FLASH_BUF_LEN);
+		/* write read buffer to MMC's write buffer */
+		mmc_set_buffer(rxbuf, MMC_FLASH_BUF_LEN);
+
+		/* write buffer to destination */
+		mmc_set_addr( dst_adr );
+
+		//If address is a start-of-sector, then erase sector before writing
+		if ((dst_adr % FLASH_SECTOR_SIZE) == 0) {
+			//xil_printf("DBG::Erase flash sector 0x%08X - 0x%08X\n\r", dst_adr, dst_adr+FLASH_SECTOR_SIZE-1);
+			mmc_unlock();
+			mmc_execute_cmd(MMC_CMD_FERASE);
+			res = mmc_get_cmd_res();
+			if ( res & 0xFFFF) {
+				xil_printf("\n\rcopy_flash_file()::ERROR::Could not erase FLASH sector 0x08X\n\r", src_adr);
+				return 1;
+			}
+		}
+
+		//Perform FLASH write
+		mmc_unlock();
+		mmc_execute_cmd(MMC_CMD_FPROG); //use previously read buffer
+		res = mmc_get_cmd_res();
+		if ( res & 0xFFFF) {
+			xil_printf("\n\rcopy_flash_file()::ERROR::Could not write FLASH address 0x08X\n\r", dst_adr);
+			return 1;
+		}
+
+		/* increment addresses for next buffer */
+		src_adr += MMC_FLASH_BUF_LEN;
+		dst_adr += MMC_FLASH_BUF_LEN;
+	}
+	xil_printf("\n\r");
+
+
+	/* write file size */
+	dst_adr = dst_id * FLASH_FILE_SIZE;
+	mmc_set_addr( dst_adr );
+	mmc_set_data(file_size);
+	mmc_unlock();
+	mmc_execute_cmd(MMC_CMD_WRLEN);
+	res = mmc_get_cmd_res();
+	if ( res & 0xFFFF) {
+		xil_printf("copy_flash_file()::ERROR::Could not write destination file size\n\r");
+		return 1;
+	}
+
+	/* compute CRC */
+	xil_printf("copy_flash_file()::INFO::Computing CRC...");
+	mmc_unlock();
+	mmc_execute_cmd(MMC_CMD_CRC);
+	res = mmc_get_cmd_res();
+	if ( res & 0xFFFF) {
+		xil_printf("ERROR::Could not compute destination file's CRC\n\r");
+		return 1;
+	} else {
+		xil_printf("DONE\n\r");
+	}
+
+	/* get computed CRC */
+	mmc_set_addr( info_addr(dst_id) );
+	mmc_execute_cmd(MMC_CMD_FREAD);
+	res = mmc_get_cmd_res();
+	if ( res & 0xFFFF) {
+		xil_printf("copy_flash_file()::ERROR::Cannot read destination file info (error 0x%08X)\n\r", res);
+		return 1;
+	}
+	mmc_get_buffer(rxbuf, 12);
+
+	/* compare source vs destination CRCs */
+	if (file_crc == buf8_to_32((rxbuf+8))) {
+		xil_printf("copy_flash_file()::INFO::CRC check successful\n\r");
+	} else {
+		xil_printf("copy_flash_file()::ERROR::Destination file's CRC does not match the source file's CRC\n\r");
+		return 1;
+	}
+
+	return 0;
 }
 
 /********************** MAIN *************************/
@@ -312,7 +441,7 @@ int main()
 {
 	u32 addr, res;
 	u8  rxbuf[256], sector;
-	char c;
+	char c, src, dst;
 
 
 	xil_printf("Hello World SYS-FPGA (compiled %s on %s)\r\n", __DATE__, __TIME__);
@@ -338,6 +467,7 @@ int main()
 		xil_printf("    B: Set programming file length\n\r");
 		xil_printf("    C: Compute file's CRC\n\r");
 		xil_printf("    D: Display MMC's data buffer\n\r");
+		xil_printf("    E: File copy\n\r");
 		xil_printf("\n\rSelect option (current address 0x%08X):\n\r", addr);
 
 		//c = getchar();
@@ -460,80 +590,24 @@ int main()
 			mmc_get_buffer(rxbuf, MMC_FLASH_BUF_LEN);
 			mmc_display_buffer(rxbuf, MMC_FLASH_BUF_LEN);
 			break;
+		case 'E': //file copy between different FLASH sectors
+			src = hex_from_console("Enter id of source file      (0x0-0xE) = 0x", 1);
+			dst = hex_from_console("Enter id of destination file (0x0-0xE) = 0x", 1);
+			xil_printf("Are you sure you want to copy file at FLASH address 0x%08X over file at address 0x%08X (y/N)?", src*FLASH_FILE_SIZE, dst*FLASH_FILE_SIZE);
+			res = inbyte();
+			if (res == 'y') {
+				xil_printf("\n\r");
+				mmc_flash_file_copy(src,dst);
+			} else {
+				xil_printf("Copy aborted\n\r");
+			}
+			break;
 		default:
 			xil_printf("Unsupported command\n\r");
 		}
 
-#if 0
-		xil_printf("\n\r   Testing command execution...");
-		for (cnt=1; cnt < 11; cnt++ ) {
-			mmc_execute_cmd(cnt);
-		}
-		xil_printf("DONE\n\r");
-
-		xil_printf("\n\r   Writing command registers...");
-		mmc_send32( MMC_ADDR_REG,   0x1234 ); //TODO make a function to write address
-		mmc_send32( MMC_ADDR_REG+2, 0x5678 );
-		mmc_send32( MMC_SECURE_KEY_REG, MMC_SECURE_KEY>>16 ); //TODO make a function to unlock
-		mmc_send32( MMC_SECURE_KEY_REG+2, MMC_SECURE_KEY&0xFFFF );
-		xil_printf("DONE\n\r");
-
-
-		xil_printf("\n\r   Reading command registers...");
-		mmc_execute_cmd(0);
-		mmc_read(rxbuf, 16);
-		xil_printf("DONE\n\r");
-
-		for (cnt = 0; cnt < 16; cnt++) {
-			xil_printf("%02x ", rxbuf[cnt]);
-		}
-		xil_printf("\n\r");
-
-
-
-		addr = MMC_FLASH_WBUF_ADDR;
-		cnt  = 0;
-		xil_printf("    writing buffer...");
-		for(addr = MMC_FLASH_WBUF_ADDR; addr < (MMC_FLASH_WBUF_ADDR+MMC_FLASH_BUF_LEN); addr+=2) {
-			mmc_send32( addr, ((cnt<<8) | (cnt+1)) );
-			cnt+=2;
-		}
-		xil_printf(" DONE\n\r");
-
-		xil_printf("\n\r    reading buffer...");
-		mmc_send32( MMC_FLASH_RBUF_ADDR, 0);
-		mmc_read(rxbuf, 256);
-		xil_printf(" DONE\n\r");
-
-		/* display read data */
-		for (cnt = 0; cnt < 256; cnt++) {
-			if (cnt%16 == 0) {
-				xil_printf("\n\r%04x:", cnt);
-			}
-			if (cnt%4 == 0) {
-				xil_printf(" ");
-			}
-
-			xil_printf("%02x", rxbuf[cnt]);
-		}
-#endif
 	} //for(;;)
 
-#if 0
-	// Reset MBU via MMC
-	mmc_send(6, 'C');
-	mmc_send(6, 'M');
-	mmc_send(6, 'D');
-
-	xil_printf("Done\r\n");
-
-	while (1)
-	{
-		gpio_toggle(&led_r_green);
-		wait_s(1);
-		xil_printf(".");
-	}
-#endif
 
 	return 0;
 }
