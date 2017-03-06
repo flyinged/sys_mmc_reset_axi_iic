@@ -1,10 +1,16 @@
+/*
+ * Author : Alessandro Malatesta
+ * Date   : 06 April 2017
+ * Info   : Debug application used to test the GPAC3 specific I2C commands for the MMC
+ */
+
 #include <stdio.h>
 #include "xil_printf.h"
 #include "xiic_l.h"
 #include <assert.h>
 #include "gpio.h"
 
-#define MMC_I2C_ADDR7 0x3E
+#define MMC_I2C_ADDR7 0x3E //MMC's I2C address (7-bits)
 
 /* MMC register map */
 #define MMC_XCMD_WREG        0x800 //execute command
@@ -25,20 +31,20 @@
 /* other constants */
 #define MMC_SECURE_KEY      0x4F50454E //security key used to unlock commands (ASCII for 'OPEN')
 #define MMC_FLASH_BUF_LEN   256
-#define FLASH_SECTOR_SIZE   0x10000 //depends on FLASH chip
-#define FLASH_INFO_ID       15 //Flash section reserved to store info on other sections
-#define FLASH_FILE_SIZE     0x100000 //FLASH is divided in 1MiB sections, on file per section
-#define SD_SECTOR_SIZE      0x200
+#define FLASH_SECTOR_SIZE   0x10000 //64KiB: minimum erasable size in MMC's FLASH
+#define FLASH_INFO_ID       15 //ID of 1MB Flash section reserved to store info on other 1MB sections
+#define FLASH_FILE_SIZE     0x100000 //FLASH is divided in 1MiB sections, one file per section
+#define SD_SECTOR_SIZE      0x200 //SD card sector size. If only part of a sector is written, all the rest is erased.
 /* MMC command codes */
-#define MMC_CMD_NULL   0x0000 //no effect. can be used to set the read address for the command registers
-#define MMC_CMD_FREAD  0x0001 //read 256B from FLASH's address stored in MMC_ADDR_REG. Data is stored in FLASH_RBUF_ADDR
+#define MMC_CMD_NULL   0x0000 //no effect. can be used to read back the whole command register seciton
+#define MMC_CMD_FREAD  0x0001 //read 256B from FLASH's address stored in MMC_ADDR_REG. Data is stored at FLASH_RBUF_ADDR
 #define MMC_CMD_FERASE 0x0002 //erase a 64K FLASH sector starting from address MMC_ADDR_REG. Address shall be 64K aligned (n*0x10000)
 #define MMC_CMD_FPROG  0x0003 //Programs 256B into flash FLASH at address stored in MMC_ADDR_REG. Data is taken from FLASH_WBUF_ADDR
 #define MMC_CMD_IAP0   0x0004 //Executes IAP (MMC FW update) using firmware tored in FLASH at address 0x0
 #define MMC_CMD_IAP1   0x0005 //Executes IAP (MMC FW update) using firmware tored in FLASH at address 0x100000
 #define MMC_CMD_RESET  0x0006 //Resets MMC's CPU (causes a power cycle)
-#define MMC_CMD_SDREAD 0x0007 //read 16B from SDcard's address stored in MMC_ADDR_REG. Data is stored in FLASH_RBUF_ADDR
-#define MMC_CMD_SDPROG 0x0008 //write 16B to SDcard's address stored in MMC_ADDR_REG. Data is taken from FLASH_WBUF_ADDR
+#define MMC_CMD_SDREAD 0x0007 //read 256B from SDcard's address stored in MMC_ADDR_REG. Data is stored in FLASH_RBUF_ADDR
+#define MMC_CMD_SDPROG 0x0008 //write 256B to SDcard's address stored in MMC_ADDR_REG. Data is taken from FLASH_WBUF_ADDR
 #define MMC_CMD_TSD    0x0009 //Execute timed shutdown (switch off power supply for 5 seconds, then switch on again)
 #define MMC_CMD_WRLEN  0x000A //Write file length. Uses the file address from the ADDR register, and the length from the DATA register.
 #define MMC_CMD_CRC    0x000B //Compute CRC on file. Uses current address register to select file, and stored file length.
@@ -47,7 +53,8 @@
 #define buf8_to_32(x) ((x[0]<<24) | (x[1]<<16) | (x[2]<<8) | x[3] )
 #define info_addr(x)  ((FLASH_INFO_ID * FLASH_FILE_SIZE) + (x * FLASH_SECTOR_SIZE))
 
-char inbyte(void);
+char inbyte(void); //jist the declaration. to make the compile happy
+
 
 void wait_us(u32 n)
 {
@@ -94,7 +101,8 @@ void mmc_send16(u8 c1, u8 c2)
 
 
 /* get a 32bit hex from STDIN
- * MSG: string printed before asking for user input
+ *
+ * MSG : string printed when asking for user input
  * NMAX: max number of input characters (input can also be terminated before reaching
  * the maximum by hitting CR on the keyboard)
  *
@@ -162,8 +170,12 @@ u32 hex_from_console(const char* msg, u8 nmax){
 }
 
 /* Send a 32 bit I2C transaction to the MMC
- *   Transaction's payload : addr(MSB), addr(LSB), data(MSB), data(LSB)
- *   returns the number of bytes sent (shall be always 4)
+ *  ADDR: 1st and 2nd byte in payload (MSB first)
+ *  DATA: 3rd and 4th byte in payload (MSB first)
+ *
+ *  I2C transaction: START | 0x7C | ADDR(15:8) | ADDR(7:0) | DATA(15:8) | DATA(7:0) | (ACK) | STOP
+ *
+ *  returns: the number of bytes sent (shall be always 4)
  */
 unsigned mmc_send32(u16 addr, u16 data) {
 
@@ -178,10 +190,12 @@ unsigned mmc_send32(u16 addr, u16 data) {
 }
 
 /* Read N bytes of data via I2C from MMC
- * The read address shall be set previously with a write transaction (either 32 or 16 bit)
- * RXBUF: buffer used to store the received data
- * N    : number of bytes requested
- * returns the number of bytes received (shall be N)
+ *  RXBUF: buffer used to store the received data
+ *  N    : number of bytes requested
+ *
+ *  The read address shall be set previously with a write transaction (either 32 or 16 bit)
+ *
+ *  returns: the number of bytes received (shall be N)
  */
 unsigned mmc_read(u8 *rxbuf, u16 n) {
 
@@ -190,10 +204,10 @@ unsigned mmc_read(u8 *rxbuf, u16 n) {
 }
 
 /* Execute GPAC3 command
- * Writes the CMD argument to address MMC_XCMD_REG (0x800)
- * The command outcome shall be always checked by reading the RESULT register with mmc_get_cmd_res()
+ *  Writes the CMD argument to address MMC_XCMD_REG (0x800)
+ *  The command outcome shall be always checked by reading the RESULT register with mmc_get_cmd_res()
  *
- * returns the number of bytes sent (shall be 4)
+ *  returns: the number of bytes sent (shall be 4)
  */
 unsigned mmc_execute_cmd(u16 cmd) {
 
@@ -202,8 +216,9 @@ unsigned mmc_execute_cmd(u16 cmd) {
 }
 
 /* write MMC address register
+ *  ADDR: 32-bit address
  *
- * returns number of bytes sent (shall be 8)
+ *  returns: number of bytes sent (shall be 8)
  */
 unsigned mmc_set_addr(u32 addr) {
 	unsigned ret = 0;
@@ -214,7 +229,10 @@ unsigned mmc_set_addr(u32 addr) {
 	return ret;
 }
 
-/* get current address register stored in MMC */
+/* get current address register stored in MMC
+ *
+ *  returns: 32-bit address read from MMC's command address register
+ */
 u32 mmc_get_addr(void) {
 	u8 rxbuf[4];
 
@@ -224,13 +242,20 @@ u32 mmc_get_addr(void) {
 	return (buf8_to_32(rxbuf));
 }
 
-/* write MMC data register */
+/* write MMC data register
+ *  DATA: 32-bit value to be written
+ *
+ *  returns: nothing
+ */
 void mmc_set_data(u32 data) {
 	mmc_send32(MMC_DATA_WREG, data>>16);
 	mmc_send32(MMC_DATA_WREG+2, data&0xFFFF);
 }
 
-/* get current data register stored in MMC */
+/* get current data register stored in MMC
+ *
+ *  returns: 32-bit value read from MMC's command data register
+ */
 u32 mmc_get_data(void) {
 	u8 rxbuf[4];
 
@@ -240,7 +265,12 @@ u32 mmc_get_data(void) {
 	return (buf8_to_32(rxbuf));
 }
 
-/* get command result register stored in MMC */
+/* get command result register stored in MMC
+ *  The register's 2 MSB contain the code of the last executed command,
+ *  the 2 LSB contain the command's result code
+ *
+ *  returns: 32-bit value read from MMC's command result register
+ */
 u32 mmc_get_cmd_res(void) {
 	u8 rxbuf[4];
 
@@ -251,8 +281,11 @@ u32 mmc_get_cmd_res(void) {
 }
 
 
-/* Get FLASH data buffer from MMC
- * returns number of bytes read
+/* Get data buffer from MMC
+ *  BUF: local buffer where read data will be stored. Shall be able to contain at least N bytes
+ *  N  : number of bytes to read (maximum 256)
+ *
+ *  returns: number of bytes read (shall be N)
  */
 unsigned mmc_get_buffer(u8 *buf, u16 n) {
 
@@ -262,7 +295,12 @@ unsigned mmc_get_buffer(u8 *buf, u16 n) {
 	return (mmc_read(buf, n)) ;
 }
 
-/* Set FLASH data buffer in MMC */
+/* Write contant of data buffer in MMC
+ *  BUF: local buffer containing data to be written. Shall contain at least N bytes
+ *  N  : number of bytes to write (maximum 256)
+ *
+ *  returns: number of bytes written (shall be N)
+ */
 unsigned mmc_set_buffer(u8 *buf, u16 n) {
 
 	unsigned ret = 0, i;
@@ -276,16 +314,20 @@ unsigned mmc_set_buffer(u8 *buf, u16 n) {
 	return (ret);
 }
 
-/* get all command registers from MMC */
+/* get all command registers from MMC
+ *  BUF: buffer where the read data is stored (shall be able to contain at least 20B
+ *
+ *  returns: number of bytes read (shall be 20)
+ */
 unsigned mmc_get_cmd_regs(u8 *buf) {
 
 	mmc_send32(MMC_XCMD_RREG, 0);
 	return (mmc_read(buf, 20)) ;
 }
 
-/* display any local buffer
- * BUF: pointer to local buffer
- * N:   number of bytes to display
+/* display any local buffer on UART console
+ *  BUF: pointer to local buffer
+ *  N:   number of bytes to display
  */
 void mmc_display_buffer(u8 *buf, u16 n) {
 	u16 i;
@@ -299,13 +341,23 @@ void mmc_display_buffer(u8 *buf, u16 n) {
 	}
 }
 
-/* Send unlock code to enable secured commands */
+/* Send unlock code to enable secured commands
+ *  this function shall be executed before sending any of the protected commands
+ *
+ *  returns: nothing
+ */
 void mmc_unlock() {
 	mmc_send32(MMC_SECURE_KEY_WREG,   MMC_SECURE_KEY>>16);
 	mmc_send32(MMC_SECURE_KEY_WREG+2, MMC_SECURE_KEY&0xFFFF);
 }
 
-/* copy a file between different section of the FLASH memory */
+/* copy a file between different section of the FLASH memory
+ *  SRC_ID: ID of source file. File's address is calculated as 0x100000*ID. File size is fixed to 1MiB.
+ *  DST_ID: ID of destination file. File's address is calculated as 0x100000*ID. File size is fixed to 1MiB.
+ *          WARNING: This file will be erased and overwritten.
+ *
+ * returns: 0 on success, 1 on failure
+ */
 int mmc_flash_file_copy(u8 src_id, u8 dst_id) {
 	u32 src_adr, dst_adr, file_size, file_crc, res;
 	u16 nbuffers, i, progress;
@@ -365,7 +417,6 @@ int mmc_flash_file_copy(u8 src_id, u8 dst_id) {
 
 		//If address is a start-of-sector, then erase sector before writing
 		if ((dst_adr % FLASH_SECTOR_SIZE) == 0) {
-			//xil_printf("DBG::Erase flash sector 0x%08X - 0x%08X\n\r", dst_adr, dst_adr+FLASH_SECTOR_SIZE-1);
 			mmc_unlock();
 			mmc_execute_cmd(MMC_CMD_FERASE);
 			res = mmc_get_cmd_res();
@@ -443,7 +494,6 @@ int main()
 	u8  rxbuf[256], sector;
 	char c, src, dst;
 
-
 	xil_printf("Hello World SYS-FPGA (compiled %s on %s)\r\n", __DATE__, __TIME__);
 
 	addr = 0;
@@ -457,18 +507,18 @@ int main()
 		xil_printf("    1: Read flash\n\r");
 		xil_printf("    2: Erase flash sector %d\n\r", sector);
 		xil_printf("    3: Program flash\n\r");
-		xil_printf("    4: Run IAP0\n\r");
-		xil_printf("    5: Run IAP1\n\r");
-		xil_printf("    6: Reset CPU\n\r");
+		xil_printf("    4: Run IAP0 (causes GPAC shutdown)\n\r");
+		xil_printf("    5: Run IAP1 (causes GPAC shutdown)\n\r");
+		xil_printf("    6: Reset CPU (causes GPAC shutdown)\n\r");
 		xil_printf("    7: Read SD card\n\r");
 		xil_printf("    8: Write SD card\n\r");
-		xil_printf("    9: Timed Shutdown\n\r");
+		xil_printf("    9: Timed Shutdown (causes GPAC shutdown)\n\r");
 		xil_printf("    A: Set address\n\r");
 		xil_printf("    B: Set programming file length\n\r");
 		xil_printf("    C: Compute file's CRC\n\r");
 		xil_printf("    D: Display MMC's data buffer\n\r");
 		xil_printf("    E: File copy\n\r");
-		xil_printf("\n\rSelect option (current address 0x%08X):\n\r", addr);
+		xil_printf("\n\rSelect option (Address Register = 0x%08X):\n\r", addr);
 
 		//c = getchar();
 		c= inbyte();
@@ -535,17 +585,13 @@ int main()
 			}
 			break;
 		case '8': //Write SDCard
-			if (addr % SD_SECTOR_SIZE) {
-				xil_printf("ERROR: address shall be sector-aligned (N*0x200)\n\r"); //TODO remove
+			mmc_unlock();
+			mmc_execute_cmd(MMC_CMD_SDPROG);
+			res = mmc_get_cmd_res();
+			if (res & 0xFFFF) {
+				xil_printf("Got error 0x%08X while writing SD card\n\r", res);
 			} else {
-				mmc_unlock();
-				mmc_execute_cmd(MMC_CMD_SDPROG);
-				res = mmc_get_cmd_res();
-				if (res & 0xFFFF) {
-					xil_printf("Got error 0x%08X while writing SD card\n\r", res);
-				} else {
-					xil_printf("DONE\n\r");
-				}
+				xil_printf("DONE\n\r");
 			}
 			break;
 		case '9': //timed shutdown
